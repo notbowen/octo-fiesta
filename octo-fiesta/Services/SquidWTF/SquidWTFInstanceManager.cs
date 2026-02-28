@@ -103,11 +103,13 @@ public class SquidWTFInstanceManager
                 var response = await _httpClient.SendAsync(request, cts.Token);
                 
                 // Check for error status codes that indicate the instance is broken/blocked
+                var code = (int)response.StatusCode;
                 if (response.StatusCode is System.Net.HttpStatusCode.Forbidden
                     or System.Net.HttpStatusCode.TooManyRequests
                     or System.Net.HttpStatusCode.InternalServerError
                     or System.Net.HttpStatusCode.BadGateway
-                    or System.Net.HttpStatusCode.ServiceUnavailable)
+                    or System.Net.HttpStatusCode.ServiceUnavailable
+                    || code == 530)
                 {
                     _logger.LogWarning("Tidal instance {Instance} returned {StatusCode}, switching to next...", 
                         currentUrl, (int)response.StatusCode);
