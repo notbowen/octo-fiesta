@@ -217,8 +217,8 @@ public class SquidWTFDownloadService : BaseDownloadService
             throw new Exception("No download URLs in Tidal manifest");
         }
         
-        var downloadUrl = manifest.Urls[0];
-        Logger.LogInformation("Got download URL for track {TrackId}: {Title} (quality: {Quality})", trackId, song.Title, actualQuality);
+        var originalUrl = manifest.Urls[0];
+        Logger.LogInformation("Got primary download URL for track {TrackId}: {Title} (quality: {Quality})", trackId, song.Title, actualQuality);
         
         // Determine file extension based on manifest mime type
         var extension = GetExtensionFromMimeType(manifest.MimeType);
@@ -236,8 +236,73 @@ public class SquidWTFDownloadService : BaseDownloadService
         // Resolve unique path if file already exists
         outputPath = PathHelper.ResolveUniquePath(outputPath);
         
-        // Download the file (no decryption needed)
-        await DownloadFileAsync(downloadUrl, outputPath, cancellationToken);
+        // Generate fallback URLs using streaming instances
+        var backupUrls = new List<string> { originalUrl };
+        var streamingInstances = await _instanceManager.GetStreamingInstancesAsync();
+        
+        if (Uri.TryCreate(originalUrl, UriKind.Absolute, out var parsedOriginalUrl))
+        {
+            foreach (var instance in streamingInstances)
+            {
+                if (Uri.TryCreate(instance, UriKind.Absolute, out var parsedInstance))
+                {
+                    if (!parsedInstance.Host.Equals(parsedOriginalUrl.Host, StringComparison.OrdinalIgnoreCase))
+                    {
+                        var builder = new UriBuilder(originalUrl)
+                        {
+                            Scheme = parsedInstance.Scheme,
+                            Host = parsedInstance.Host,
+                            Port = parsedInstance.Port
+                        };
+                        backupUrls.Add(builder.Uri.ToString());
+                    }
+                }
+            }
+        }
+        
+        // Download the file with failover
+        var downloadSuccess = false;
+        var exceptions = new List<Exception>();
+        
+        foreach (var url in backupUrls)
+        {
+            try
+            {
+                if (backupUrls.Count > 1 && url != originalUrl)
+                {
+                    Logger.LogInformation("Trying fallback streaming URL for track {TrackId}", trackId);
+                }
+                
+                await DownloadFileAsync(url, outputPath, cancellationToken);
+                downloadSuccess = true;
+                break; // Stop trying if successful
+            }
+            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException)
+            {
+                var host = "unknown";
+                try { host = new Uri(url).Host; } catch { /* ignore */ }
+                
+                Logger.LogWarning(ex, "Failed to download from streaming URL host {Host}, trying next...", host);
+                exceptions.Add(ex);
+                
+                // Clean up partial file
+                if (IOFile.Exists(outputPath))
+                {
+                    try { IOFile.Delete(outputPath); } catch { /* ignore */ }
+                }
+                
+                // If it's the original cancellation token getting cancelled, don't continue to try next instances
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+            }
+        }
+        
+        if (!downloadSuccess)
+        {
+            throw new AggregateException($"Failed to download track {trackId} from all {backupUrls.Count} available streaming endpoints", exceptions);
+        }
         
         // Write metadata
         await WriteMetadataAsync(outputPath, song, cancellationToken);

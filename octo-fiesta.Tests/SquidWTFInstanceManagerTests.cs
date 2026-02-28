@@ -19,8 +19,15 @@ public class SquidWTFInstanceManagerTests
         "https://instance3.example.com"
     ];
 
+    private static readonly string[] TestStreamingInstances = 
+    [
+        "https://stream1.example.com",
+        "https://stream2.example.com",
+        "https://stream3.example.com"
+    ];
+
     private static string BuildInstancesJson() =>
-        $$"""{"api":["{{string.Join("\",\"", TestInstances)}}"]}""";
+        $$"""{"api":["{{string.Join("\",\"", TestInstances)}}"],"streaming":["{{string.Join("\",\"", TestStreamingInstances)}}"]}""";
 
     private static SquidWTFInstanceManager CreateManager(
         Mock<HttpMessageHandler> handlerMock,
@@ -164,5 +171,21 @@ public class SquidWTFInstanceManagerTests
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(TestInstances[2], manager.GetCurrentInstance());
+    }
+
+    [Fact]
+    public async Task GetStreamingInstancesAsync_ReturnsParsedStreamingInstances()
+    {
+        var handlerMock = CreateHandlerWithInstancesLoaded((_, _) =>
+            new HttpResponseMessage(HttpStatusCode.OK));
+
+        var manager = CreateManager(handlerMock);
+
+        var instances = await manager.GetStreamingInstancesAsync();
+
+        Assert.Equal(TestStreamingInstances.Length, instances.Count);
+        Assert.Equal(TestStreamingInstances[0], instances[0]);
+        Assert.Equal(TestStreamingInstances[1], instances[1]);
+        Assert.Equal(TestStreamingInstances[2], instances[2]);
     }
 }

@@ -23,6 +23,7 @@ public class SquidWTFInstanceManager
     
     // Instance state - shared across all requests during app lifetime
     private List<string>? _tidalInstances;
+    private List<string>? _streamingInstances;
     private int _currentInstanceIndex;
     private string? _currentTidalInstance;
     private readonly SemaphoreSlim _initLock = new(1, 1);
@@ -43,6 +44,15 @@ public class SquidWTFInstanceManager
         TimeoutSeconds = _settings.InstanceTimeoutSeconds > 0 
             ? _settings.InstanceTimeoutSeconds 
             : DefaultTimeoutSeconds;
+    }
+    
+    /// <summary>
+    /// Gets the list of available streaming instances
+    /// </summary>
+    public async Task<IReadOnlyList<string>> GetStreamingInstancesAsync()
+    {
+        await EnsureInitializedAsync();
+        return _streamingInstances ?? _tidalInstances ?? new List<string>();
     }
     
     /// <summary>
@@ -92,19 +102,22 @@ public class SquidWTFInstanceManager
                 var request = createRequest(currentUrl);
                 var response = await _httpClient.SendAsync(request, cts.Token);
                 
-                // Accept successful responses and 404 (resource genuinely not found)
-                if (response.IsSuccessStatusCode 
-                    || response.StatusCode is System.Net.HttpStatusCode.NotFound)
+                // Check for error status codes that indicate the instance is broken/blocked
+                if (response.StatusCode is System.Net.HttpStatusCode.Forbidden
+                    or System.Net.HttpStatusCode.TooManyRequests
+                    or System.Net.HttpStatusCode.InternalServerError
+                    or System.Net.HttpStatusCode.BadGateway
+                    or System.Net.HttpStatusCode.ServiceUnavailable)
                 {
-                    return response;
+                    _logger.LogWarning("Tidal instance {Instance} returned {StatusCode}, switching to next...", 
+                        currentUrl, (int)response.StatusCode);
+                    response.Dispose();
+                    SwitchToNextInstance();
+                    continue;
                 }
                 
-                // Any other status code — instance is broken/blocked/overloaded
-                _logger.LogWarning("Tidal instance {Instance} returned {StatusCode}, switching to next...", 
-                    currentUrl, (int)response.StatusCode);
-                response.Dispose();
-                SwitchToNextInstance();
-                continue;
+                // Success - this instance works
+                return response;
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
@@ -184,6 +197,10 @@ public class SquidWTFInstanceManager
             _tidalInstances = instances.Api
                 .Select(url => url.TrimEnd('/'))
                 .ToList();
+                
+            _streamingInstances = instances.Streaming != null && instances.Streaming.Count > 0
+                ? instances.Streaming.Select(url => url.TrimEnd('/')).ToList()
+                : new List<string>(_tidalInstances);
             
             _currentInstanceIndex = 0;
             _currentTidalInstance = _tidalInstances[0];
@@ -197,6 +214,7 @@ public class SquidWTFInstanceManager
             
             // Fallback to hardcoded instance
             _tidalInstances = new List<string> { "https://tidal-api.binimum.org" };
+            _streamingInstances = new List<string> { "https://tidal-api.binimum.org" };
             _currentInstanceIndex = 0;
             _currentTidalInstance = _tidalInstances[0];
         }
